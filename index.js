@@ -1,26 +1,133 @@
+﻿document.addEventListener('DOMContentLoaded', () => {
+  'use strict';
 
-    if (activeView) {
-      activeView.classList.add('active');
-      activeView.scrollTop = 0; // Reset scroll view to top of hero section
-    }
+  const state = {
+    currentStep: 0,
+    name: 'ANÓNIMO',
+    colorHue: 220,
+    colorHex: '#0055ff',
+    frequency: null,
+    style: null,
+    canvasInjected: false,
+    hasInteractedAudio: false
+  };
 
-    // Update Navigation UI
-    const progressPercent = (stepIndex / (views.length - 1)) * 100;
-    progressLine.style.width = `${progressPercent}%`;
+  const zoneViews = Array.from(document.querySelectorAll('.zone-view'));
+  const stepDots = Array.from(document.querySelectorAll('.step-dot'));
+  const progressLine = document.getElementById('progress-line');
+  const userStatusText = document.getElementById('user-status-text');
+  const preloader = document.getElementById('preloader');
+  const preloaderBar = document.getElementById('preloader-bar');
+  const preloaderStatus = document.getElementById('preloader-status');
+  const audioToggle = document.getElementById('btn-toggle-audio');
+  const audioBtnText = document.getElementById('audio-btn-text');
 
-    stepDots.forEach((dot, idx) => {
-      dot.classList.remove('active', 'completed');
-      if (idx === stepIndex) {
-        dot.classList.add('active');
-      } else if (idx < stepIndex) {
-        dot.classList.add('completed');
+  const AmbientSynth = {
+    ctx: null,
+    gain: null,
+    oscillator: null,
+    playing: false,
+
+    ensure() {
+      if (this.ctx) return;
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      this.ctx = new AudioCtx();
+      this.gain = this.ctx.createGain();
+      this.gain.gain.value = 0.025;
+      this.oscillator = this.ctx.createOscillator();
+      this.oscillator.type = 'sine';
+      this.oscillator.frequency.value = 72;
+      this.oscillator.connect(this.gain);
+      this.gain.connect(this.ctx.destination);
+      this.oscillator.start();
+    },
+
+    play() {
+      this.ensure();
+      if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
+      this.playing = true;
+      if (audioToggle) audioToggle.classList.add('playing');
+      if (audioBtnText) audioBtnText.textContent = 'ON';
+    },
+
+    toggle() {
+      this.ensure();
+      if (!this.ctx) return;
+      if (this.playing) {
+        this.gain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.08);
+        this.playing = false;
+        if (audioToggle) audioToggle.classList.remove('playing');
+        if (audioBtnText) audioBtnText.textContent = 'MUTED';
+      } else {
+        if (this.ctx.state === 'suspended') this.ctx.resume();
+        this.gain.gain.setTargetAtTime(0.025, this.ctx.currentTime, 0.08);
+        this.playing = true;
+        if (audioToggle) audioToggle.classList.add('playing');
+        if (audioBtnText) audioBtnText.textContent = 'ON';
       }
+    },
+
+    updateTheme(stepIndex) {
+      if (!this.oscillator || !this.ctx) return;
+      const frequencies = [72, 84, 96, 60, 108, 48];
+      this.oscillator.frequency.setTargetAtTime(frequencies[stepIndex] || 72, this.ctx.currentTime, 0.25);
+    }
+  };
+
+  if (audioToggle) {
+    audioToggle.addEventListener('click', () => AmbientSynth.toggle());
+  }
+
+  function hidePreloader() {
+    if (!preloader || preloader.classList.contains('fade-out')) return;
+    if (preloaderBar) preloaderBar.style.width = '100%';
+    if (preloaderStatus) preloaderStatus.textContent = 'NUCLEO LISTO';
+    setTimeout(() => preloader.classList.add('fade-out'), 250);
+  }
+
+  function runPreloader() {
+    if (!preloader) return;
+    let progress = 0;
+    const timer = setInterval(() => {
+      progress = Math.min(progress + Math.random() * 18 + 8, 96);
+      if (preloaderBar) preloaderBar.style.width = `${progress}%`;
+      if (progress >= 96) clearInterval(timer);
+    }, 140);
+
+    window.addEventListener('load', () => {
+      clearInterval(timer);
+      hidePreloader();
+    }, { once: true });
+
+    setTimeout(() => {
+      clearInterval(timer);
+      hidePreloader();
+    }, 2200);
+  }
+
+  runPreloader();
+
+  function navigateToStep(stepIndex) {
+    const clampedStep = Math.max(0, Math.min(stepIndex, zoneViews.length - 1));
+    state.currentStep = clampedStep;
+
+    zoneViews.forEach((zone, idx) => {
+      zone.classList.toggle('active', idx === clampedStep);
+      if (idx === clampedStep) zone.scrollTop = 0;
     });
 
-    // Special handlers when entering specific zones
-    onEnterZone(stepIndex);
+    stepDots.forEach((dot, idx) => {
+      dot.classList.toggle('active', idx === clampedStep);
+      dot.classList.toggle('completed', idx < clampedStep);
+    });
 
-    // Update ambient synth music theme
+    if (progressLine) {
+      const maxIndex = Math.max(stepDots.length - 1, 1);
+      progressLine.style.width = `${(clampedStep / maxIndex) * 100}%`;
+    }
+
+    onEnterZone(clampedStep);
     AmbientSynth.updateTheme(stepIndex);
   }
 
@@ -1229,6 +1336,72 @@
     };
     return `#${f(0)}${f(8)}${f(4)}`;
   }
+
+
+  // ==========================================================================
+  // AUDIO GUIDE PLAYERS
+  // ==========================================================================
+  const guideAudioFiles = {
+    0: 'assets/audio_zone0.wav',
+    1: 'assets/audio_zone1.mp3',
+    2: 'assets/audio_zone2.mp3',
+    3: 'assets/audio_zone3.mp3',
+    4: 'assets/audio_zone4.mp3'
+  };
+
+  let activeGuideAudio = null;
+  let activeGuideButton = null;
+
+  function resetGuideButton(button) {
+    if (!button) return;
+    button.classList.remove('playing');
+    const text = button.querySelector('.guide-audio-btn-text');
+    const icon = button.querySelector('.guide-audio-play-icon');
+    if (text) text.textContent = 'REPRODUCIR RELATO';
+    if (icon) icon.textContent = '▶';
+  }
+
+  function setGuideButtonPlaying(button) {
+    if (!button) return;
+    button.classList.add('playing');
+    const text = button.querySelector('.guide-audio-btn-text');
+    const icon = button.querySelector('.guide-audio-play-icon');
+    if (text) text.textContent = 'PAUSAR RELATO';
+    if (icon) icon.textContent = '❚❚';
+  }
+
+  document.querySelectorAll('.btn-audio-guide-toggle').forEach((button) => {
+    button.addEventListener('click', () => {
+      const zone = button.getAttribute('data-zone-audio');
+      const src = guideAudioFiles[zone];
+      if (!src) return;
+
+      if (activeGuideAudio && activeGuideButton === button && !activeGuideAudio.paused) {
+        activeGuideAudio.pause();
+        resetGuideButton(button);
+        return;
+      }
+
+      if (activeGuideAudio) {
+        activeGuideAudio.pause();
+        activeGuideAudio.currentTime = 0;
+        resetGuideButton(activeGuideButton);
+      }
+
+      activeGuideAudio = new Audio(src);
+      activeGuideButton = button;
+      activeGuideAudio.addEventListener('ended', () => resetGuideButton(button), { once: true });
+      activeGuideAudio.addEventListener('error', () => {
+        resetGuideButton(button);
+        const text = button.querySelector('.guide-audio-btn-text');
+        if (text) text.textContent = 'AUDIO NO DISPONIBLE';
+      }, { once: true });
+
+      activeGuideAudio.play()
+        .then(() => setGuideButtonPlaying(button))
+        .catch(() => resetGuideButton(button));
+    });
+  });
 
   // ==========================================================================
   // CUSTOM PRO CURSOR ENGINE
